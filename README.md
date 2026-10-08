@@ -56,6 +56,8 @@ See the [getting started guide](https://luxus.github.io/pi-hindsight/start/getti
 
 See [memory behavior](https://luxus.github.io/pi-hindsight/concepts/memory-behavior/) and [session memory modes](https://luxus.github.io/pi-hindsight/concepts/session-memory-modes/) for details.
 
+On Pi hosts supporting `ToolDefinition.exposure`, explicit Recall, Retain (including User Bank retain), and Reflect tools stay direct. Administrative tools register as `deferred`, remaining callable from codemode and loadable for direct calls through `tool_search`. Automatic recall/retain lifecycle behavior is unchanged.
+
 ## Documentation
 
 - [Start](https://luxus.github.io/pi-hindsight/start/) — install and first setup

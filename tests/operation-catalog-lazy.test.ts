@@ -49,6 +49,15 @@ it("registers the shared catalog through the extension entrypoint", () => {
   hindsightExtension(pi as never);
 
   expect(pi.registerTool.mock.calls.map(([tool]) => tool.name)).toContain("hindsight_recall");
+  const direct = [
+    "hindsight_recall",
+    "hindsight_retain",
+    "hindsight_retain_global",
+    "hindsight_reflect",
+  ];
+  for (const [tool] of pi.registerTool.mock.calls) {
+    expect(tool.exposure, tool.name).toBe(direct.includes(tool.name) ? "direct" : "deferred");
+  }
   expect(pi.registerCommand.mock.calls.map(([name]) => name)).toEqual([
     "hindsight",
     "hindsight:next-opt-out",
