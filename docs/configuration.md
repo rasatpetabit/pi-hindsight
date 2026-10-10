@@ -182,6 +182,28 @@ Agents can get and patch this field through `hindsight_config` as `userScopeTags
 }
 ```
 
+### `scope.unscopedRecallBanks`
+
+Bank ids whose Recall and Reflect reads skip the automatic scope tag group. Default: `[]` (every bank keeps its automatic filter).
+
+Use it for a bank whose documents are not tagged with this extension's derived `project:<id>` / `repo:<hash>` tags, for example a bank written by another tool. Without it, `hindsight_recall({ bank: "<id>" })` ANDs the current repository's scope tags into the filter and returns nothing.
+
+- Applies to `hindsight_recall`, `hindsight_reflect`, and automatic recall when the listed id is the active Project Bank or User Bank.
+- Caller-supplied `tags` / `tagGroups` still apply, so `tags: ["project:github.com/owner/repo"]` narrows a listed bank to one repository.
+- The shared-observation leaf (`includeSharedObservations`) is skipped for listed banks; with no scope group it would narrow recall to untagged memories only.
+- Retain is unchanged: writes to a listed bank keep their normal `source:` / `project:` / `repo:` / `session:` tags.
+- The User Bank and the default Project Bank are affected only when their bank id is listed.
+
+Entries are trimmed and de-duplicated; empty strings are dropped. A non-array value or any non-string entry makes the whole list fall back to `[]`. The field is file-only: it is not in the `hindsight_config` allowlist and has no TUI field. When set, `hindsight_status` shows an `Unscoped recall banks` row.
+
+```json
+{
+  "scope": {
+    "unscopedRecallBanks": ["shared-history"]
+  }
+}
+```
+
 ### `recall.minScores` (optional)
 
 Exact fields for automatic-recall score floors. **Defaults: no floors** (inject quality-filtered

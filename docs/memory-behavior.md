@@ -27,6 +27,8 @@ Each recall scope is enforced with a strict Hindsight `tag_groups` filter (`any_
 
 User/life bank recall must include observation-scope tags, not only `source:pi`. Observations inherit default scopes such as `harness:pi` rather than the full source-memory tag set, so a `source:pi`-only filter excludes them. Automatic inject and tool recall both read `scope.userScopeTags`. Set `scope.userScopeTags` to `[]` to drop the tag filter (bank-level isolation only).
 
+To read a bank whose documents carry different tags (for example a bank written by another tool), list its id in `scope.unscopedRecallBanks`. Recall and Reflect against a listed bank skip the automatic scope group but still apply caller `tags` / `tagGroups`; retain tags are unchanged. See [configuration](configuration.md).
+
 ### Shared / untagged observations (opt-in)
 
 Hindsight can consolidate **shared** observations under the empty tag set inside a bank (`observation_scopes: "shared"`). Those memories have **no** `project:` tag, so default strict project recall excludes them.

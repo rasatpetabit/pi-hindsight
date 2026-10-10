@@ -29,6 +29,8 @@ Each recall scope is enforced with a strict Hindsight `tag_groups` filter (`any_
 
 User/life bank recall must include observation-scope tags, not only `source:pi`. Observations inherit default scopes such as `harness:pi` rather than the full source-memory tag set, so a `source:pi`-only filter excludes them. Automatic inject and tool recall both read `scope.userScopeTags`. Set `scope.userScopeTags` to `[]` to drop the tag filter (bank-level isolation only).
 
+To read a bank whose documents carry different tags (for example a bank written by another tool), list its id in `scope.unscopedRecallBanks`. Recall and Reflect against a listed bank skip the automatic scope group but still apply caller `tags` / `tagGroups`; retain tags are unchanged. See [configuration](/pi-hindsight/reference/configuration/).
+
 Set `recall.includeSourceFacts: true` (bounded by `recall.maxSourceFactsTokens`) to attach supporting evidence lines to recalled observations. It is off by default to keep recall conservative.
 
 `recall.queryTimestamp` should normally be omitted. Set it only when recall should be anchored to a specific point in time.
