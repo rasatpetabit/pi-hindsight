@@ -8,7 +8,17 @@ export interface MemoryRecallScope {
   tagGroups: HindsightTagGroup[];
 }
 
+/**
+ * True when `scope.unscopedRecallBanks` lists this bank: Recall/Reflect reads skip the
+ * automatic scope tag group (and the shared-observation leaf). Read paths only.
+ */
+export function isUnscopedRecallBank(config: ResolvedConfig, bankId: string): boolean {
+  return config.scope.unscopedRecallBanks.includes(bankId);
+}
+
+/** Automatic Recall/Reflect scope tags for a bank. Not used by retain paths. */
 export function scopeTagsForBank(cwd: string, config: ResolvedConfig, bankId: string): string[] {
+  if (isUnscopedRecallBank(config, bankId)) return [];
   return config.banks.user.enabled && bankId === config.banks.user.bankId
     ? createMemoryIdentity(cwd, config).globalRecallTags
     : recallScopeTags(cwd, config);
@@ -86,18 +96,20 @@ export function selectMemoryScopes(cwd: string, config: ResolvedConfig): MemoryR
   const includeShared = config.scope.includeSharedObservations === true;
 
   if (config.banks.project.enabled) {
+    const unscoped = isUnscopedRecallBank(config, identity.projectBankId);
     scopes.push({
       kind: "project",
       bankId: identity.projectBankId,
-      tagGroups: scopeTagGroups(identity.projectRecallTags, includeShared),
+      tagGroups: unscoped ? [] : scopeTagGroups(identity.projectRecallTags, includeShared),
     });
   }
 
   if (config.banks.user.enabled && config.banks.user.bankId) {
+    const unscoped = isUnscopedRecallBank(config, config.banks.user.bankId);
     scopes.push({
       kind: "global",
       bankId: config.banks.user.bankId,
-      tagGroups: scopeTagGroups(identity.globalRecallTags, false),
+      tagGroups: unscoped ? [] : scopeTagGroups(identity.globalRecallTags, false),
     });
   }
 

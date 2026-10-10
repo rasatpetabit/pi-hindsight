@@ -7,7 +7,7 @@ import {
 } from "../lifecycle/retrieval-telemetry.js";
 import { textFromRecallResponse } from "../lifecycle/recall.js";
 import type { MemoryOperationsDeps } from "./memory-operation-types.js";
-import { composeScopedTagFilter, scopeTagsForBank } from "./memory-scope.js";
+import { composeScopedTagFilter, isUnscopedRecallBank, scopeTagsForBank } from "./memory-scope.js";
 import { resolveOperationBank } from "../banks/bank-selection.js";
 import { readLastRecallSnapshot, resolveLastRecallPath } from "../lifecycle/recall-visibility.js";
 import {
@@ -91,8 +91,10 @@ export function createRecallOperations(deps: MemoryOperationsDeps) {
           projectBankId: deps.getProjectBankId(),
         });
         const scopeTags = scopeTagsForBank(cwd, config, bankId);
+        // Unscoped banks skip the shared-observation leaf too: it would narrow to untagged.
         const includeShared =
-          filters.includeSharedObservations ?? config.scope.includeSharedObservations;
+          !isUnscopedRecallBank(config, bankId) &&
+          (filters.includeSharedObservations ?? config.scope.includeSharedObservations);
         resolved = { bankId };
         const options = {
           budget: filters.budget ?? config.recall.budget,
@@ -172,7 +174,8 @@ export function createRecallOperations(deps: MemoryOperationsDeps) {
       });
       const scopeTags = scopeTagsForBank(cwd, config, bankId);
       const includeShared =
-        filters.includeSharedObservations ?? config.scope.includeSharedObservations;
+        !isUnscopedRecallBank(config, bankId) &&
+        (filters.includeSharedObservations ?? config.scope.includeSharedObservations);
       const result = await deps.getClient().reflect(bankId, query, {
         ...(context ? { context } : {}),
         budget: filters.budget ?? config.recall.budget,

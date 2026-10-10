@@ -82,6 +82,15 @@ export function buildStatusFields(config: ResolvedConfig, ctx: StatusFieldContex
     tone: config.scope.includeSharedObservations ? "custom" : "default",
   });
 
+  if (config.scope.unscopedRecallBanks.length) {
+    fields.push({
+      key: "unscopedRecallBanks",
+      label: "Unscoped recall banks",
+      value: config.scope.unscopedRecallBanks.join(", "),
+      tone: "custom",
+    });
+  }
+
   fields.push({
     key: "projectScope",
     label: "Project scope",

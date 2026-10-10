@@ -235,6 +235,7 @@ export function normalizeConfig(
         projectIdStrategy?: unknown;
         includeSharedObservations?: unknown;
         userScopeTags?: unknown;
+        unscopedRecallBanks?: unknown;
       };
     }
   ).scope;
@@ -242,6 +243,13 @@ export function normalizeConfig(
   const userScopeTags = [
     ...new Set(
       stringArray(scopeRaw?.userScopeTags, DEFAULT_CONFIG.scope.userScopeTags).filter(Boolean),
+    ),
+  ];
+  const unscopedRecallBanks = [
+    ...new Set(
+      stringArray(scopeRaw?.unscopedRecallBanks, DEFAULT_CONFIG.scope.unscopedRecallBanks)
+        .map((bankId) => bankId.trim())
+        .filter(Boolean),
     ),
   ];
   return {
@@ -268,6 +276,7 @@ export function normalizeConfig(
       ),
       // Empty array is intentional: no tag filter on user-bank recall (#592).
       userScopeTags,
+      unscopedRecallBanks,
     },
     hindsight: {
       baseUrl: stringValue(config.hindsight?.baseUrl, DEFAULT_CONFIG.hindsight.baseUrl),

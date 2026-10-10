@@ -98,6 +98,12 @@ export interface ScopeConfig {
    * Empty array means no tag filter (bank-level isolation only).
    */
   userScopeTags: string[];
+  /**
+   * Bank ids whose Recall and Reflect reads skip the automatic project/user scope tag
+   * group. Caller-supplied `tags` / `tagGroups` still apply. Retain tags are unchanged.
+   * Default `[]` — every bank keeps its automatic scope filter.
+   */
+  unscopedRecallBanks: string[];
 }
 
 export interface ResolvedConfig {

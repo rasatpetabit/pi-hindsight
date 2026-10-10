@@ -101,4 +101,31 @@ describe("status fields tones", () => {
     expect(shared?.value).toContain("include");
     expect(shared?.tone).toBe("custom");
   });
+
+  it("shows unscoped recall banks only when configured", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-status-unscoped-"));
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "hindsight.json"), "{}\n");
+    const banks = {
+      ...DEFAULT_CONFIG.banks,
+      project: { enabled: true, bankId: "kai-coding", derive: "manual" as const },
+    };
+    const unset = buildStatusFields(config({ setupComplete: true, banks }), {
+      cwd,
+      projectBankId: "kai-coding",
+    });
+    expect(unset.find((f) => f.key === "unscopedRecallBanks")).toBeUndefined();
+
+    const fields = buildStatusFields(
+      config({
+        setupComplete: true,
+        scope: { ...DEFAULT_CONFIG.scope, unscopedRecallBanks: ["shared-history"] },
+        banks,
+      }),
+      { cwd, projectBankId: "kai-coding" },
+    );
+    const unscoped = fields.find((f) => f.key === "unscopedRecallBanks");
+    expect(unscoped?.value).toBe("shared-history");
+    expect(unscoped?.tone).toBe("custom");
+  });
 });
