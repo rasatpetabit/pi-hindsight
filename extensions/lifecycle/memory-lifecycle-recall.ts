@@ -103,20 +103,84 @@ function buildRecallNotification(memoryCount: number, bankIds: string[], failed:
   return "Hindsight recalled no matching memory";
 }
 
-function patchWithRecallMessage(
-  event: ContextEvent,
-  recallMessage: AgentMessage,
-): ContextPatch | undefined {
-  const last = event.messages[event.messages.length - 1];
-  const lastRole = (last as unknown as { role?: string } | undefined)?.role;
-  if (last && lastRole === "user") {
-    return { messages: [...event.messages.slice(0, -1), recallMessage, last] };
-  }
-  return undefined;
+/** Request-local reconstruction only: never add these snapshots to the session transcript. */
+function createAppendRecallHistory() {
+  let session = "";
+  let snapshots = new Map<string, RecallCacheEntry | undefined>();
+  return (event: ContextEvent, runtime: RuntimeSnapshot) => {
+    const identity = JSON.stringify([runtime.cwd, runtime.sessionFile, runtime.sessionId]);
+    if (identity !== session) {
+      session = identity;
+      snapshots = new Map();
+    }
+    const activeSnapshots = snapshots;
+    const signature = (message: CacheKeyMessage) =>
+      JSON.stringify([message.timestamp, message.content]);
+    const entries = new Map<string, string[]>();
+    for (const entry of runtime.branch ?? []) {
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const key = signature(entry.message);
+      const ids = entries.get(key) ?? [];
+      ids.push(entry.id);
+      entries.set(key, ids);
+    }
+    const occurrences = new Map<string, number>();
+    const anchors = event.messages.map((message) => {
+      if (message.role !== "user") return undefined;
+      const key = signature(message);
+      const occurrence = occurrences.get(key) ?? 0;
+      occurrences.set(key, occurrence + 1);
+      return { key, fallback: `message:${key}:${occurrence}` };
+    });
+    // Right-align with the active branch: compaction can remove earlier identical messages.
+    const keys = new Map<number, string>();
+    for (let i = anchors.length - 1; i >= 0; i--) {
+      const anchor = anchors[i];
+      if (anchor) keys.set(i, entries.get(anchor.key)?.pop() ?? anchor.fallback);
+    }
+    const active = new Set(keys.values());
+    for (const key of activeSnapshots.keys()) {
+      if (!active.has(key)) activeSnapshots.delete(key);
+    }
+    const tail = keys.get(event.messages.length - 1);
+    // Unknown historical turns were already sent without a snapshot in this epoch.
+    for (const key of active) {
+      if (key !== tail && !activeSnapshots.has(key)) activeSnapshots.set(key, undefined);
+    }
+    return {
+      rendered: event.messages
+        .flatMap((_message, index) => {
+          const key = keys.get(index);
+          const entry = key === undefined ? undefined : activeSnapshots.get(key);
+          return entry?.rendered ? [entry.rendered] : [];
+        })
+        .join("\n\n"),
+      known: tail !== undefined && activeSnapshots.has(tail),
+      entry: tail === undefined ? undefined : activeSnapshots.get(tail),
+      remember(entry: RecallCacheEntry | undefined) {
+        if (tail !== undefined) activeSnapshots.set(tail, entry);
+      },
+      patch(): ContextPatch | undefined {
+        let injected = false;
+        const messages = event.messages.flatMap((message, index) => {
+          const key = keys.get(index);
+          const entry = key === undefined ? undefined : activeSnapshots.get(key);
+          if (!entry?.rendered) return [message];
+          injected = true;
+          return [
+            { role: "user", content: entry.rendered, timestamp: entry.timestamp } as AgentMessage,
+            message,
+          ];
+        });
+        return injected ? { messages } : undefined;
+      },
+    };
+  };
 }
 
 export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPolicy {
   const cache = createRecallCache(() => deps.getConfig().recall.cacheTtlMs);
+  const appendHistory = createAppendRecallHistory();
   const origins = new WeakMap<RecallCacheEntry, RetrievalTelemetry[]>();
   return {
     async recall(event: ContextEvent, runtime: RuntimeSnapshot): Promise<ContextPatch | undefined> {
@@ -166,22 +230,31 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
 
       const scopes = selectMemoryScopes(runtime.cwd, config);
       if (scopes.length === 0) return skip("no-scopes");
-      if (config.recall.injectionPosition === "append" && !canAppendRecallMessage(event)) {
-        return skip("append-requires-user");
+      if (runtime.signal?.aborted) {
+        deps.setMemoryStatus(runtime, "idle");
+        return skip("aborted");
+      }
+      const history =
+        config.recall.injectionPosition === "append" ? appendHistory(event, runtime) : undefined;
+      if (history && (!canAppendRecallMessage(event) || (history.known && !history.entry))) {
+        const patch = history.patch();
+        injection(patch ? "success" : "skipped", history.rendered, {
+          reason: "append-history",
+        });
+        return patch;
       }
 
-      const cacheKey = recallTurnCacheKey(
-        scopes.map((s) => s.bankId),
-        event.messages,
-      );
-      let recallResult = cache.get(cacheKey);
+      const cacheKey =
+        JSON.stringify([runtime.cwd, runtime.sessionFile, runtime.sessionId]) +
+        "|" +
+        recallTurnCacheKey(
+          scopes.map((s) => s.bankId),
+          event.messages,
+        );
+      let recallResult = history?.entry ?? cache.get(cacheKey);
       cacheStatus = recallResult ? "hit" : "miss";
 
       try {
-        if (runtime.signal?.aborted) {
-          deps.setMemoryStatus(runtime, "idle");
-          return skip("aborted");
-        }
         if (recallResult && deps.observer) {
           for (const origin of origins.get(recallResult) ?? []) {
             emitRetrieval(observe, () =>
@@ -272,6 +345,7 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
           deps.setMemoryStatus(runtime, "idle");
           return skip("aborted");
         }
+        history?.remember(recallResult);
         if (!rendered) {
           injection(
             failed
@@ -280,17 +354,14 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
                 : "error"
               : "empty",
           );
-          return undefined;
+          return history?.patch();
         }
         const recallMessage = {
           role: "user",
           content: rendered,
           timestamp,
         } as AgentMessage;
-        const patch =
-          config.recall.injectionPosition === "append"
-            ? patchWithRecallMessage(event, recallMessage)
-            : { messages: [recallMessage, ...event.messages] };
+        const patch = history ? history.patch() : { messages: [recallMessage, ...event.messages] };
         injection(patch ? "success" : "skipped", patch ? rendered : "", { failedScopes: failed });
         return patch;
       } catch (error) {
@@ -323,7 +394,8 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
             // Best-effort debug snapshot; do not let a write failure mask the original recall failure.
           }
         }
-        return undefined;
+        history?.remember(undefined);
+        return history?.patch();
       }
     },
   };

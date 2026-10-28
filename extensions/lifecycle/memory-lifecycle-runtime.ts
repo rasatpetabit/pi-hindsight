@@ -1,3 +1,4 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getSessionFile } from "../utils/session.js";
 import { formatHindsightStatus, type HindsightActivity } from "../utils/status.js";
@@ -9,7 +10,11 @@ export type RuntimeCtx = {
     setStatus(key: string, text: string | undefined): void;
     notify(message: string, level?: string): void;
   };
-  sessionManager?: { getSessionFile?: () => string | undefined };
+  sessionManager?: {
+    getSessionFile?: () => string | undefined;
+    getSessionId?: () => string;
+    getBranch?: () => SessionEntry[];
+  };
   /** Pi agent abort signal for the active turn, when the context hook provides one. */
   signal?: AbortSignal | undefined;
 };
@@ -18,6 +23,8 @@ export type RuntimeSnapshot = {
   cwd: string;
   ui: RuntimeCtx["ui"];
   sessionFile?: string;
+  sessionId?: string;
+  branch?: SessionEntry[];
   signal?: AbortSignal | undefined;
 };
 
@@ -34,6 +41,8 @@ export function snapshotRuntime(ctx: RuntimeCtx): RuntimeSnapshot | undefined {
       cwd,
       ui,
       ...(sessionFile ? { sessionFile } : {}),
+      ...(ctx.sessionManager?.getSessionId ? { sessionId: ctx.sessionManager.getSessionId() } : {}),
+      ...(ctx.sessionManager?.getBranch ? { branch: ctx.sessionManager.getBranch() } : {}),
       ...(signal ? { signal } : {}),
     };
   } catch {
