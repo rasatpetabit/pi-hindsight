@@ -10,7 +10,11 @@ Automatic recall runs in Pi's `context` hook. The extension composes a determini
 
 The injected block is not written to the Pi transcript by this extension and is not retained back into Hindsight.
 
-Automatic recall caches that block for `recall.cacheTtlMs` (default 60s). The cache key is the active bank IDs plus the last user message's content identity, not transcript length, so auto-continue retries that append an identical nudge reuse the first-seen result and timestamp. A new last user message, a bank-id change, or TTL expiry fetches again.
+Retrieval results are cached for `recall.cacheTtlMs` (default 60s), within the active session, by bank IDs and last-user content identity. Identical prompts can reuse retrieval within that TTL; new content, changed banks, or TTL expiry can fetch again for a new user turn.
+
+In default `append` mode, each logical user turn gets an immutable rendered Recall Block immediately before that user message. Every request reconstructs all such snapshots still anchored in active context, including tool continuations and later user turns. Retrieval TTL expiry never refreshes or drops already-sent snapshots. Empty or failed recall is also frozen for that turn, so recovery cannot insert memory into sent history. No new query runs on tool continuations. Branch navigation preserves shared active anchors and discards removed ones; compaction/reset prunes removed anchors. Switching sessions or reloading the extension starts a new ephemeral epoch: no cross-reload continuity or on-disk cache is promised, and historical turns are not retrospectively recalled.
+
+Explicit `prepend` mode retains its existing request-local behavior and TTL semantics; it does not provide this append-mode history guarantee.
 
 If the user presses Esc during automatic recall, Pi's abort signal cancels in-flight Hindsight recall and mental-model loading. The context hook returns no patch: recalled memory is not injected, last-recall sidecars are not written, memory status returns to idle, and the cancellation is not reported as an extension error.
 

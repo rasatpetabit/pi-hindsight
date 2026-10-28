@@ -50,7 +50,7 @@ See the [getting started guide](https://luxus.github.io/pi-hindsight/start/getti
 
 - Project memory stays in a project bank by default.
 - User memory is opt-in and explicitly configured.
-- Recall injection is ephemeral; recalled memory is not written back into transcripts.
+- Recall injection is ephemeral; recalled memory is not written back into transcripts. In append mode, each active user turn keeps its original Recall Block across tool rounds and later turns; retrieval TTL expiry does not rewrite sent history. Snapshots are in-memory only and end when their turn leaves active context or the session/extension is reloaded.
 - Automatic retain redacts common secrets before writing memory.
 - Exact document deletion requires exact bank ID, exact document ID, and `confirm: true`.
 

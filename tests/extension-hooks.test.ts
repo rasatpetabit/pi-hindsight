@@ -1026,7 +1026,127 @@ describe("extension hooks", () => {
     expect(contextResult.messages.at(-1)).toEqual(original[0]);
   });
 
-  it("does not append synthetic recall when transcript does not end with user", async () => {
+  it("keeps active append snapshots independent of TTL, branch leaf and session changes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(1_000_000);
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-history-"));
+    mkdirSync(join(cwd, ".git"));
+    writeSetupCompleteConfig(cwd, {
+      recall: { injectionPosition: "append", storeLastRecall: false },
+    });
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const lifecycle = createMemoryLifecycle(cwd);
+    let session = "session-a";
+    let branch: any[] = [];
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: {
+        getSessionId: () => session,
+        getSessionFile: () => join(cwd, `${session}.jsonl`),
+        getBranch: () => branch,
+      },
+    };
+    await lifecycle.initialize(ctx);
+    let count = 0;
+    mocked.client.recall.mockImplementation(async () => ({
+      results: [{ text: `recall-${++count}` }],
+    }));
+    const user = (timestamp: number) => ({ role: "user", content: "identical prompt", timestamp });
+    const t1 = user(1),
+      t2 = user(2),
+      t3 = user(3);
+    const tool = { role: "toolResult", content: "result", timestamp: 4 };
+    const recall = async (messages: any[], ids: string[]) => {
+      branch = messages.map((message, i) => ({ type: "message", id: ids[i], message }));
+      const original = structuredClone(messages);
+      const patch = await lifecycle.recall({ messages } as any, ctx);
+      expect(messages).toEqual(original);
+      expect(JSON.stringify(messages)).not.toContain("hindsight-memory");
+      return patch?.messages ?? messages;
+    };
+    const a = await recall([t1], ["u1"]);
+    vi.setSystemTime(Date.now() + 61_000);
+    const b = await recall([t1, tool], ["u1", "tool1"]);
+    expect(b).toEqual([...a, tool]);
+    expect(await recall([t1, tool], ["u1", "changing-leaf"])).toEqual(b);
+    expect(count).toBe(1);
+    expect(
+      await lifecycle.recall({ messages: [t1, tool] } as any, {
+        ...ctx,
+        signal: AbortSignal.abort(),
+      }),
+    ).toBeUndefined();
+    expect(await recall([t1, tool], ["u1", "tool1"])).toEqual(b);
+    const c = await recall([t1, tool, t2], ["u1", "tool1", "u2"]);
+    expect(c.slice(0, b.length)).toEqual(b);
+    vi.setSystemTime(Date.now() + 61_000);
+    const d = await recall([t1, tool, t2, tool], ["u1", "tool1", "u2", "tool2"]);
+    expect(d).toEqual([...c, tool]);
+    const e = await recall([t1, tool, t2, tool, t3], ["u1", "tool1", "u2", "tool2", "u3"]);
+    expect(e.slice(0, d.length)).toEqual(d);
+    expect(e.filter((m) => String(m.content).includes("hindsight-memory"))).toHaveLength(3);
+    expect(count).toBe(3);
+    // Rewind preserves the common ancestor, prunes descendants. Same timestamp/content
+    // on a sibling is still a distinct entry, not a leaf-ID or prompt-text cache key.
+    expect(await recall([t1], ["u1"])).toEqual(a);
+    vi.setSystemTime(Date.now() + 61_000);
+    const sibling = await recall([t1, tool, t2], ["u1", "tool1", "sibling-u2"]);
+    expect(sibling.slice(0, a.length)).toEqual(a);
+    expect(sibling.at(-2)?.content).toContain("recall-4");
+    expect(JSON.stringify(sibling)).not.toContain("recall-2");
+    // Compaction leaves only t2: its position is reconstructed, t1 is pruned.
+    const compacted = await recall([t2, tool], ["sibling-u2", "tool2"]);
+    expect(compacted[0]?.content).toContain("recall-4");
+    expect(JSON.stringify(compacted)).not.toContain("recall-1");
+    await recall([], []); // reset prunes all, even if IDs are later encountered again
+    expect(await recall([t2, tool], ["sibling-u2", "tool2"])).toEqual([t2, tool]);
+    expect(count).toBe(4); // never fetch beside already-sent history
+    session = "session-b";
+    expect(await recall([t1, tool], ["u1", "tool1"])).toEqual([t1, tool]);
+    vi.setSystemTime(Date.now() + 61_000);
+    const switched = await recall([t1, tool, t2], ["u1", "tool1", "u2"]);
+    expect(switched.at(-2)?.content).toContain("recall-5");
+    expect(JSON.stringify(switched)).not.toContain("recall-1");
+    // Explicit reload creates a new ephemeral epoch, not retrospective recall.
+    const reloaded = createMemoryLifecycle(cwd);
+    expect(await reloaded.recall({ messages: [t1, tool] } as any, ctx)).toBeUndefined();
+    expect(existsSync(join(cwd, ".pi", "hindsight", "last-recall.json"))).toBe(false);
+    expect(mocked.client.retain).not.toHaveBeenCalled();
+  });
+
+  it.each(["empty", "outage"])(
+    "freezes %s append absence while preserving earlier recall",
+    async (failure) => {
+      const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-history-"));
+      mkdirSync(join(cwd, ".git"));
+      writeSetupCompleteConfig(cwd);
+      const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+      const lifecycle = createMemoryLifecycle(cwd);
+      const ctx = {
+        cwd,
+        ui: { setStatus: vi.fn(), notify: vi.fn() },
+        sessionManager: { getSessionFile: () => join(cwd, "session.jsonl") },
+      };
+      const t1 = { role: "user", content: "first", timestamp: 1 };
+      const t2 = { role: "user", content: "second", timestamp: 2 };
+      const first = await lifecycle.recall({ messages: [t1] } as any, ctx);
+      if (failure === "outage") mocked.client.recall.mockRejectedValue(new Error("offline"));
+      else mocked.client.recall.mockResolvedValue({ results: [] });
+      const messages = [t1, t2];
+      const second = await lifecycle.recall({ messages } as any, ctx);
+      expect(second?.messages).toEqual([first?.messages[0], t1, t2]);
+      const calls = mocked.client.recall.mock.calls.length;
+      mocked.client.recall.mockResolvedValue({ results: [{ text: "recovered" }] });
+      expect(await lifecycle.recall({ messages } as any, ctx)).toEqual(second);
+      const tool = { role: "toolResult", content: "output", timestamp: 3 };
+      const continuation = await lifecycle.recall({ messages: [...messages, tool] } as any, ctx);
+      expect(continuation?.messages).toEqual([...second!.messages, tool]);
+      expect(mocked.client.recall).toHaveBeenCalledTimes(calls);
+    },
+  );
+
+  it("replays sent append recall on tool results without querying again", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
     mkdirSync(join(cwd, ".git"));
     mkdirSync(join(cwd, ".pi"));
@@ -1048,19 +1168,17 @@ describe("extension hooks", () => {
     const { default: hindsightExtension } = await import("../extensions/index.js");
     hindsightExtension(pi as any);
     await handlers.session_start?.[0]?.({}, ctx);
+    const user = { role: "user", content: "Use tools", timestamp: 1 };
+    const first = await handlers.context?.[0]?.({ messages: [user] }, ctx);
     const beforeCalls = mocked.client.recall.mock.calls.length;
-    const contextResult = await handlers.context?.[0]?.(
-      {
-        messages: [
-          { role: "user", content: "Use tools", timestamp: 1 },
-          { role: "assistant", content: "Calling tool", timestamp: 2 },
-          { role: "toolResult", content: "tool output", timestamp: 3 },
-        ],
-      },
-      ctx,
-    );
+    const messages = [
+      user,
+      { role: "assistant", content: "Calling tool", timestamp: 2 },
+      { role: "toolResult", content: "tool output", timestamp: 3 },
+    ];
+    const contextResult = await handlers.context?.[0]?.({ messages }, ctx);
 
-    expect(contextResult).toBeUndefined();
+    expect(contextResult.messages).toEqual([first.messages[0], ...messages]);
     expect(mocked.client.recall).toHaveBeenCalledTimes(beforeCalls);
   });
 
