@@ -2,17 +2,17 @@
 
 ## Agent Behavioral Contract
 
-These rules override all other instructions when they conflict. They exist to reduce LLM coding drift, over-engineering, and speculative changes.
+These rules exist to reduce LLM coding drift, over-engineering, and speculative changes. Where they conflict with fleet policy, fleet policy governs (`/srv/workflows/policy/`).
 
 ### 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
+- State your assumptions explicitly; resolve technical uncertainty with evidence, not by asking.
 - If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+- Ask only for missing authority for an outward-facing or irreversible act, or when the desired outcome is genuinely unclear; every technical decision is yours (`/srv/workflows/policy/auq.md` § "Decision ownership and escalation").
 
 ### 2. Simplicity First
 
@@ -66,7 +66,7 @@ Operational execution rules for this coding agent session.
 
 ### 5. Operational, Not Conversational
 
-Work from explicit instructions. If the user's request is vague, stop and clarify. Do not proceed on best-guess intent.
+Work from explicit instructions. If the desired outcome is genuinely unclear, ask (the two gates: `/srv/workflows/policy/auq.md`); do not proceed on best-guess intent.
 
 **Pattern:** `read-before-write → evidence-before-action → minimal diff → verify-before-report`
 
@@ -86,7 +86,7 @@ Do not infer repository paths, APIs, helpers, or behavior. Confirm facts by:
 
 ### 8. Define Stop Gates
 
-Ambiguity, missing files, conflicting docs, forbidden commands, or unclear scope should produce **BLOCKED**. Stop and ask before proceeding.
+Missing files, conflicting docs, forbidden commands, or scope beyond your authority should produce **BLOCKED**. Technical ambiguity is resolved by evidence, not by asking (the two gates: `/srv/workflows/policy/auq.md`).
 
 Do not proceed with best-guess assumptions. Surface uncertainty explicitly.
 
@@ -456,47 +456,3 @@ Use the project `pr-shepherd` subagent for one-worktree, one-PR CI/Codex/merge s
 - For memory-path changes, validate recall, retain, queue behavior, and import idempotency.
 - For docs changes, ensure `npm run docs:check` passes and links remain valid.
 - Sync `README.md`, `CHANGELOG.md`, and docs whenever user-visible behavior or real open-work state changes.
-
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
-
-This project is indexed by GitNexus as **pi-hindsight** (4533 symbols, 7784 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
-
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/pi-hindsight/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/pi-hindsight/clusters` | All functional areas |
-| `gitnexus://repo/pi-hindsight/processes` | All execution flows |
-| `gitnexus://repo/pi-hindsight/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
