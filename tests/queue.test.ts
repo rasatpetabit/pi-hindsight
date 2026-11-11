@@ -20,7 +20,9 @@ import {
   enqueueRetainCoalesced,
   enqueueRetainJob,
   enqueueRetainJobCoalesced,
+  flushRetain,
   flushRetainQueue,
+  isExplicitRetainJob,
   isQueueLockOwnerStale,
   readDeadLetterQueue,
   readRetainQueue,
@@ -1014,4 +1016,118 @@ process.stdin.on("end", async () => {
       ]);
     },
   );
+
+  it("classifies explicit retain provenance only", () => {
+    const withSource = (retainSource?: string): RetainJob => ({
+      ...job,
+      item: {
+        ...job.item,
+        ...(retainSource === undefined
+          ? {}
+          : { metadata: { source: "pi-hindsight", retainSource } }),
+      },
+    });
+    expect(isExplicitRetainJob(withSource("tool"))).toBe(true);
+    expect(isExplicitRetainJob(withSource("git-seed"))).toBe(true);
+    expect(isExplicitRetainJob(withSource("import"))).toBe(true);
+    expect(isExplicitRetainJob(withSource("auto"))).toBe(false);
+    expect(isExplicitRetainJob(withSource("command"))).toBe(false);
+    expect(isExplicitRetainJob(withSource("unknown"))).toBe(false);
+    expect(isExplicitRetainJob(withSource(undefined))).toBe(false);
+  });
+
+  it("keeps predicate-rejected jobs queued in order without burning retries or budget", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-hindsight-q-")), "q.jsonl");
+    const autoJob: RetainJob = {
+      ...job,
+      id: "auto",
+      item: {
+        ...job.item,
+        metadata: { source: "pi-hindsight", retainSource: "auto" },
+      },
+      retries: 3,
+      lastError: "prior outage",
+    };
+    const legacyJob: RetainJob = { ...job, id: "legacy" };
+    const toolJob: RetainJob = {
+      ...job,
+      id: "tool",
+      item: { ...job.item, metadata: { source: "pi-hindsight", retainSource: "tool" } },
+    };
+    const importJob: RetainJob = {
+      ...job,
+      id: "import",
+      item: { ...job.item, metadata: { source: "pi-hindsight", retainSource: "import" } },
+    };
+    await enqueueRetainJob(path, autoJob);
+    await enqueueRetainJob(path, legacyJob);
+    await enqueueRetainJob(path, toolJob);
+    await enqueueRetainJob(path, importJob);
+
+    const delivered: string[] = [];
+    const result = await flushRetainQueue(
+      path,
+      {
+        retain: async (_bankId: unknown, content: unknown) => {
+          delivered.push(String(content));
+          return { operation_id: `op-${delivered.length}` };
+        },
+        recall: async () => [],
+        reflect: async () => ({}),
+      },
+      { predicate: isExplicitRetainJob, maxJobs: 2 },
+    );
+
+    // The two rejected jobs do not consume the two-job budget: the explicit jobs
+    // still drain FIFO, and the rejected ones keep their exact state and position.
+    expect(result.sent).toBe(2);
+    expect(delivered).toEqual(["raw", "raw"]);
+    expect(await readRetainQueue(path)).toEqual([autoJob, legacyJob]);
+    expect(result.remaining).toBe(2);
+  });
+
+  it("enforces disabled-extension and recall-only consent centrally in flushRetain", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-flush-retain-"));
+    const queuePath = join(cwd, DEFAULT_CONFIG.retain.queuePath);
+    const autoJob: RetainJob = {
+      ...job,
+      id: "auto",
+      item: { ...job.item, metadata: { source: "pi-hindsight", retainSource: "auto" } },
+    };
+    const seedJob: RetainJob = {
+      ...job,
+      id: "seed",
+      item: { ...job.item, metadata: { source: "pi-hindsight", retainSource: "git-seed" } },
+    };
+    await enqueueRetainJob(queuePath, autoJob);
+    await enqueueRetainJob(queuePath, seedJob);
+
+    const delivered: string[] = [];
+    const client = {
+      retain: async (_bankId: unknown, content: unknown) => {
+        delivered.push(String(content));
+        return {};
+      },
+      recall: async () => [],
+      reflect: async () => ({}),
+    };
+
+    const disabledResult = await flushRetain(cwd, { ...DEFAULT_CONFIG, enabled: false }, client);
+    expect(disabledResult).toEqual({ sent: 0, remaining: 2, deadLettered: 0, malformed: 0 });
+    expect(delivered).toEqual([]);
+
+    const recallOnlyResult = await flushRetain(
+      cwd,
+      { ...DEFAULT_CONFIG, retain: { ...DEFAULT_CONFIG.retain, enabled: false } },
+      client,
+    );
+    expect(recallOnlyResult.sent).toBe(1);
+    expect(recallOnlyResult.remaining).toBe(1);
+    expect((await readRetainQueue(queuePath)).map((queued) => queued.id)).toEqual(["auto"]);
+
+    const enabledResult = await flushRetain(cwd, DEFAULT_CONFIG, client);
+    expect(enabledResult.sent).toBe(1);
+    expect(enabledResult.remaining).toBe(0);
+    expect(await readRetainQueue(queuePath)).toEqual([]);
+  });
 });

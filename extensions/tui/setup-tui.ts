@@ -222,7 +222,7 @@ export async function runHindsightSetupTui(
       if (action === "choose-deployment") await handleDeployment(ctx, deps, config);
       else if (action === "guided-setup") await runGuidedSetup({ ctx, deps, cwd: ctx.cwd });
       else if (action === "flush-queue") {
-        const result = await createMemoryOperations(deps).flush(ctx.cwd);
+        const result = await createMemoryOperations(deps).flush(ctx.cwd, getSessionFile(ctx));
         ctx.ui.notify(formatFlushRetainQueueResult(result), flushRetainQueueNotifyLevel(result));
       } else if (action === "set-mode") await handleSetMode(ctx, deps);
       else if (action === "next-opt-out") await handleNextOptOut(ctx, deps);

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DEFAULT_CONFIG } from "../extensions/config/config.js";
 import { enqueueRetainJob, readRetainQueue, resolveQueuePath } from "../extensions/queue/queue.js";
 import {
@@ -1819,6 +1819,215 @@ describe("extension hooks", () => {
     expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["3"]);
   });
 
+  it("drains only explicit retain jobs on shutdown in recall-only mode", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(
+      join(cwd, ".pi", "hindsight.json"),
+      JSON.stringify({
+        setupComplete: true,
+        banks: { project: { enabled: true, bankId: "test-coding", derive: "manual" } },
+        // Recall-only: automatic retain is off, so only explicit-provenance jobs consent
+        // to delivery (ADR 003 keeps queue flush allowed for already accepted jobs).
+        retain: { enabled: false, shutdownFlushMaxJobs: 10, shutdownFlushTimeoutMs: 1_000 },
+        notifications: { startup: false },
+      }),
+    );
+    const queuePath = resolveQueuePath(cwd, ".pi/hindsight/retain-queue.jsonl");
+    const baseJob: RetainJob = {
+      id: "1",
+      bankId: "project-bank",
+      createdAt: "now",
+      documentId: "doc",
+      updateMode: "append",
+      item: { content: "raw", context: "ctx", async: true, tags: ["source:pi"] },
+      retries: 0,
+    };
+    await enqueueRetainJob(queuePath, {
+      ...baseJob,
+      id: "auto",
+      item: {
+        ...baseJob.item,
+        metadata: { source: "pi-hindsight", retainSource: "auto" },
+      },
+    });
+    await enqueueRetainJob(queuePath, {
+      ...baseJob,
+      id: "tool",
+      item: {
+        ...baseJob.item,
+        metadata: { source: "pi-hindsight", retainSource: "tool" },
+      },
+    });
+    await enqueueRetainJob(queuePath, { ...baseJob, id: "legacy" });
+
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: { getSessionFile: () => join(cwd, "session.jsonl") },
+    };
+
+    const lifecycle = createMemoryLifecycle(cwd);
+    await lifecycle.initialize(ctx);
+    mocked.client.retain.mockClear();
+    await lifecycle.shutdown(ctx);
+
+    expect(mocked.client.retain).toHaveBeenCalledTimes(1);
+    expect((mocked.client.retain.mock.calls[0] as unknown[])[1]).toBe("raw");
+    expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["auto", "legacy"]);
+  });
+
+  it("drains only explicit retain jobs on the periodic flush in recall-only mode", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(
+      join(cwd, ".pi", "hindsight.json"),
+      JSON.stringify({
+        setupComplete: true,
+        banks: { project: { enabled: true, bankId: "test-coding", derive: "manual" } },
+        retain: {
+          enabled: false,
+          flushIntervalMs: 50,
+          periodicFlushMaxJobs: 10,
+          periodicFlushTimeoutMs: 1_000,
+        },
+        notifications: { startup: false },
+      }),
+    );
+    const queuePath = resolveQueuePath(cwd, ".pi/hindsight/retain-queue.jsonl");
+    const baseJob: RetainJob = {
+      id: "1",
+      bankId: "project-bank",
+      createdAt: "now",
+      documentId: "doc",
+      updateMode: "append",
+      item: { content: "raw", context: "ctx", async: true, tags: ["source:pi"] },
+      retries: 0,
+    };
+    await enqueueRetainJob(queuePath, {
+      ...baseJob,
+      id: "auto",
+      item: {
+        ...baseJob.item,
+        metadata: { source: "pi-hindsight", retainSource: "auto" },
+      },
+    });
+    await enqueueRetainJob(queuePath, {
+      ...baseJob,
+      id: "tool",
+      item: {
+        ...baseJob.item,
+        metadata: { source: "pi-hindsight", retainSource: "tool" },
+      },
+    });
+
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: { getSessionFile: () => join(cwd, "session.jsonl") },
+    };
+
+    const lifecycle = createMemoryLifecycle(cwd);
+    await lifecycle.initialize(ctx);
+    try {
+      await waitForCondition(async () => mocked.client.retain.mock.calls.length === 1, 5_000);
+      expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["auto"]);
+      // Give a second interval tick room to double-deliver or touch the auto job.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(mocked.client.retain).toHaveBeenCalledTimes(1);
+      expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["auto"]);
+    } finally {
+      await lifecycle.shutdown(ctx);
+    }
+    expect(mocked.client.retain).toHaveBeenCalledTimes(1);
+    expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["auto"]);
+  });
+
+  it("does not flush the queue on shutdown when the extension is disabled", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(
+      join(cwd, ".pi", "hindsight.json"),
+      JSON.stringify({
+        enabled: false,
+        setupComplete: true,
+        banks: { project: { enabled: true, bankId: "test-coding", derive: "manual" } },
+        retain: { enabled: true, shutdownFlushMaxJobs: 10, flushIntervalMs: 50 },
+        notifications: { startup: false },
+      }),
+    );
+    const queuePath = resolveQueuePath(cwd, ".pi/hindsight/retain-queue.jsonl");
+    await enqueueRetainJob(queuePath, {
+      id: "tool",
+      bankId: "project-bank",
+      createdAt: "now",
+      documentId: "doc",
+      updateMode: "append",
+      item: {
+        content: "raw",
+        context: "ctx",
+        metadata: { source: "pi-hindsight", retainSource: "tool" },
+      },
+      retries: 0,
+    });
+
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: { getSessionFile: () => join(cwd, "session.jsonl") },
+    };
+
+    const lifecycle = createMemoryLifecycle(cwd);
+    await lifecycle.initialize(ctx);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await lifecycle.shutdown(ctx);
+
+    expect(mocked.client.retain).not.toHaveBeenCalled();
+    expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["tool"]);
+  });
+
+  it("does not flush the queue on shutdown when setup is incomplete", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
+    mkdirSync(join(cwd, ".git"));
+    // No .pi/hindsight.json, no bank ids, no runtime state at the default queue path:
+    // the setup gate must stay closed, and a closed gate flushes nothing.
+    const queuePath = resolveQueuePath(cwd, ".pi/hindsight/custom-queue.jsonl");
+    mkdirSync(dirname(queuePath), { recursive: true });
+    await enqueueRetainJob(queuePath, {
+      id: "tool",
+      bankId: "project-bank",
+      createdAt: "now",
+      documentId: "doc",
+      updateMode: "append",
+      item: {
+        content: "raw",
+        context: "ctx",
+        metadata: { source: "pi-hindsight", retainSource: "tool" },
+      },
+      retries: 0,
+    });
+
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: { getSessionFile: () => join(cwd, "session.jsonl") },
+    };
+
+    const lifecycle = createMemoryLifecycle(cwd);
+    await lifecycle.initialize(ctx);
+    await lifecycle.shutdown(ctx);
+
+    expect(mocked.client.retain).not.toHaveBeenCalled();
+    expect((await readRetainQueue(queuePath)).map((job) => job.id)).toEqual(["tool"]);
+  });
+
   it("emits optional recall and retain notifications", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-"));
     mkdirSync(join(cwd, ".git"));
@@ -1952,5 +2161,61 @@ describe("extension hooks", () => {
       expect.stringMatching(/^Hindsight post-retain reflect failed: reflect unavailable$/),
       "warning",
     );
+  });
+
+  it("tags automatic turn jobs with retainSource auto and skips periodic/shutdown drains on session opt-out", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-hooks-session-optout-"));
+    mkdirSync(join(cwd, ".git"));
+    mkdirSync(join(cwd, ".pi"));
+    const sessionFile = join(cwd, "session.jsonl");
+    writeFileSync(
+      join(cwd, ".pi", "hindsight.json"),
+      JSON.stringify({
+        setupComplete: true,
+        banks: { project: { enabled: true, bankId: "test-coding", derive: "manual" } },
+        retain: {
+          enabled: true,
+          delivery: "coalesced",
+          flushIntervalMs: 150,
+          shutdownFlushMaxJobs: 10,
+        },
+        notifications: { startup: false },
+      }),
+    );
+    const { setSessionMemoryMode, setSessionRetainEnabled } =
+      await import("../extensions/utils/session-memory-meta.js");
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: { getSessionFile: () => sessionFile },
+    };
+
+    const lifecycle = createMemoryLifecycle(cwd);
+    await lifecycle.initialize(ctx);
+    // With flushIntervalMs > 0, agent_end coalesces onto the queue without immediate remote delivery.
+    await lifecycle.retain(
+      { messages: [{ role: "assistant", content: "durable auto note", timestamp: 2 }] } as any,
+      ctx,
+    );
+    // Opt out at the session level immediately before the periodic tick and before shutdown: neither may drain.
+    await setSessionRetainEnabled(cwd, sessionFile, false);
+
+    const queuePath = resolveQueuePath(cwd, ".pi/hindsight/retain-queue.jsonl");
+    const queuedBeforeOptOut = await readRetainQueue(queuePath);
+    expect(queuedBeforeOptOut).toHaveLength(1);
+    expect(queuedBeforeOptOut[0]?.item.metadata).toMatchObject({
+      source: "pi-hindsight",
+      retainSource: "auto",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(mocked.client.retain).not.toHaveBeenCalled();
+
+    await setSessionRetainEnabled(cwd, sessionFile, true);
+    await setSessionMemoryMode(cwd, sessionFile, "read-only");
+    await lifecycle.shutdown(ctx);
+    expect(mocked.client.retain).not.toHaveBeenCalled();
+    expect(await readRetainQueue(queuePath)).toHaveLength(1);
   });
 });

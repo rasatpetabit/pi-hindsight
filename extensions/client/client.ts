@@ -176,6 +176,11 @@ export function createHindsightClient(config: ResolvedConfig): HindsightLikeClie
     baseUrl: config.hindsight.baseUrl,
     ...(config.hindsight.apiKey ? { apiKey: config.hindsight.apiKey } : {}),
     userAgent: PI_HINDSIGHT_USER_AGENT,
+    // SDK 1.2.1 added internal capacity retries (429/503, Retry-After-aware) for the
+    // idempotent recall/reflect calls. pi-hindsight owns retry policy through withRetry
+    // (client-retry.ts); maxAttempts: 1 disables the SDK layer so the two never stack and
+    // a 5xx surfaces to the caller after exactly the attempts withRetry asked for.
+    maxAttempts: 1,
   });
   const lowLevel = createLowLevelClient(config);
   const timeoutMs = config.hindsight.timeoutMs;

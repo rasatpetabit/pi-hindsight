@@ -15,7 +15,6 @@ import {
   enqueueRetain,
   enqueueRetainCoalesced,
   flushRetain,
-  summarizeRetain,
   summarizeRetainQueue,
   retainQueuePath,
   type FlushRetainQueueResult,
@@ -86,6 +85,8 @@ export function buildRetainJob(args: {
     metadata: {
       cwd: args.cwd,
       imported: "false",
+      source: "pi-hindsight",
+      retainSource: "auto",
       ...(args.sessionFile ? { pi_session_file: args.sessionFile } : {}),
     },
     ...(observationScopes.length ? { observationScopes } : {}),
@@ -204,18 +205,18 @@ export async function retainDurably(args: RetainDurablyArgs): Promise<RetainDura
     queueJobId: job.id,
     updateMode: job.updateMode,
   };
-  const enqueueResult = await enqueueRetain(args.cwd, args.config, job);
-  if (enqueueResult.previousLength > 0) {
-    const summary = await summarizeRetain(args.cwd, args.config);
-    return {
-      ...receipt,
-      enqueued: true,
-      sent: 0,
-      remaining: summary.active.valid + summary.active.malformed,
-      deadLettered: 0,
-    };
-  }
-  const result = await flushRetain(args.cwd, args.config, args.client, { maxJobs: 1 });
+  await enqueueRetain(args.cwd, args.config, job);
+  // Always attempt a bounded flush after enqueue: the previous "skip the flush whenever
+  // the queue was already non-empty" bail-out meant one stranded job made every later
+  // explicit retain enqueue-and-never-drain once automatic flushes were off (ADR 003:
+  // queue flush drains already accepted jobs). stopOnFirstFailure bounds the call so a
+  // full outage costs one delivery attempt, and in recall-only mode the predicate keeps
+  // automatic/legacy jobs queued (no consent) while explicit jobs drain in FIFO order.
+  const result = await flushRetain(args.cwd, args.config, args.client, {
+    maxJobs: Math.max(1, args.config.retain.periodicFlushMaxJobs || 10),
+    maxElapsedMs: args.config.retain.periodicFlushTimeoutMs || 15_000,
+    stopOnFirstFailure: true,
+  });
   return {
     ...receipt,
     enqueued: true,

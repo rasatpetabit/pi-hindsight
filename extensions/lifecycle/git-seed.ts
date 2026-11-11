@@ -142,6 +142,8 @@ export function buildGitLogRetainJob(args: {
       imported: "true",
       seed: "gitlog",
       head_sha: args.headSha,
+      // Explicit provenance: opt-in seed jobs consent to recall-only queue drains.
+      retainSource: "git-seed",
     },
     strategy: "gitlog",
   });
@@ -217,7 +219,9 @@ export async function seedGitLog(args: SeedGitLogArgs): Promise<SeedGitLogResult
   let flushed = 0;
   if (args.flush !== false) {
     const result = await flushRetain(args.cwd, args.config, args.client, {
-      maxJobs: 1,
+      maxJobs: Math.max(1, args.config.retain.periodicFlushMaxJobs || 10),
+      maxElapsedMs: args.config.retain.periodicFlushTimeoutMs || 15_000,
+      stopOnFirstFailure: true,
     });
     await recordRetainDeliveries(args.cwd, args.config, result);
     flushed = result.sent;
