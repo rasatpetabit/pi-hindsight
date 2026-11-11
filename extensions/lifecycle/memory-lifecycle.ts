@@ -11,12 +11,16 @@ import { isMemorySetupComplete, setupRequiredMessage } from "../config/setup-gat
 import { deriveProjectBankId } from "../banks/banking.js";
 import { createHindsightClient } from "../client/client.js";
 import { ensureGlobalBank, ensureProjectBank } from "../banks/bank-operations.js";
-import { flushRetainQueue, retainQueuePath } from "../queue/queue.js";
+import { flushRetainQueue, isExplicitRetainJob, retainQueuePath } from "../queue/queue.js";
 import { recordRetainDeliveries } from "./retain.js";
 import { formatFlushRetainQueueResult } from "../queue/flush-presenter.js";
 import { bankSelectionMessage } from "../utils/diagnostics.js";
 import type { HindsightLikeClient, ResolvedConfig } from "../types.js";
 import { redactError } from "../utils/sanitize.js";
+import {
+  getEffectiveSessionMemoryMode,
+  readSessionMemoryMeta,
+} from "../utils/session-memory-meta.js";
 import {
   notify,
   setMemoryStatus as setRuntimeMemoryStatus,
@@ -84,23 +88,30 @@ export function createMemoryLifecycle(
 
   const startPeriodicFlush = (runtime: RuntimeSnapshot) => {
     stopPeriodicFlush();
-    if (!config.enabled || !config.retain.enabled || config.retain.flushIntervalMs <= 0) return;
+    // Queue flush drains already accepted jobs, so it runs even when automatic retain is
+    // disabled (recall-only mode, ADR 003). It still requires an enabled extension and a
+    // completed setup, and in recall-only mode the predicate keeps non-explicit jobs
+    // queued: draining them would deliver automatic retains without consent.
+    if (!config.enabled || config.retain.flushIntervalMs <= 0) return;
     if (!isMemorySetupComplete(config, runtime.cwd)) return;
     const queuePath = retainQueuePath(runtime.cwd, config);
     periodicFlush = setInterval(() => {
       if (periodicFlushActive) return;
       periodicFlushActive = true;
-      void flushRetainQueue(queuePath, client, {
-        stopOnFirstFailure: true,
-        maxJobs: config.retain.periodicFlushMaxJobs,
-        maxElapsedMs: config.retain.periodicFlushTimeoutMs,
-      })
-        .then(async (result) => {
-          await recordRetainDeliveries(runtime.cwd, config, result);
-          if (result.deadLettered || result.remaining) {
-            notify(runtime, formatFlushRetainQueueResult(result), "warning");
-          }
-        })
+      void (async () => {
+        const sessionMeta = await readSessionMemoryMeta(runtime.cwd, runtime.sessionFile);
+        if (!getEffectiveSessionMemoryMode(sessionMeta).retain) return;
+        const result = await flushRetainQueue(queuePath, client, {
+          stopOnFirstFailure: true,
+          maxJobs: config.retain.periodicFlushMaxJobs,
+          maxElapsedMs: config.retain.periodicFlushTimeoutMs,
+          ...(config.retain.enabled ? {} : { predicate: isExplicitRetainJob }),
+        });
+        await recordRetainDeliveries(runtime.cwd, config, result);
+        if (result.deadLettered || result.remaining) {
+          notify(runtime, formatFlushRetainQueueResult(result), "warning");
+        }
+      })()
         .catch((error) => {
           notify(runtime, `Periodic retain queue flush failed: ${redactError(error)}`, "warning");
         })
@@ -264,15 +275,20 @@ export function createMemoryLifecycle(
 
     async shutdown(ctx: RuntimeCtx): Promise<void> {
       stopPeriodicFlush();
-      if (!config.enabled || !config.retain.enabled) return;
       const runtime = snapshotRuntime(ctx);
       if (!runtime) return;
-      if (!isMemorySetupComplete(config, runtime.cwd)) return;
+      // Same consent contract as the periodic flush: a disabled extension, an
+      // incomplete setup, or a session retain opt-out flushes nothing; recall-only
+      // mode drains only explicit jobs.
+      if (!config.enabled || !isMemorySetupComplete(config, runtime.cwd)) return;
+      const sessionMeta = await readSessionMemoryMeta(runtime.cwd, runtime.sessionFile);
+      if (!getEffectiveSessionMemoryMode(sessionMeta).retain) return;
       try {
         const result = await flushRetainQueue(retainQueuePath(runtime.cwd, config), client, {
           maxJobs: config.retain.shutdownFlushMaxJobs,
           maxElapsedMs: config.retain.shutdownFlushTimeoutMs,
           stopOnFirstFailure: true,
+          ...(config.retain.enabled ? {} : { predicate: isExplicitRetainJob }),
         });
         await recordRetainDeliveries(runtime.cwd, config, result);
         if (result.deadLettered || result.remaining) {

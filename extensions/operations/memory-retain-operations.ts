@@ -1,5 +1,6 @@
 import type { MemoryOperationsDeps } from "./memory-operation-types.js";
-import { flushRetain } from "../queue/queue.js";
+import { isMemorySetupComplete } from "../config/setup-gate.js";
+import { flushRetain, retainQueuePath, summarizeRetainQueue } from "../queue/queue.js";
 import { resolveOperationBank } from "../banks/bank-selection.js";
 import { explicitMemoryDocumentId } from "../utils/session.js";
 import { createMemoryIdentity, explicitRetainTags } from "./memory-identity.js";
@@ -120,8 +121,23 @@ export function createRetainOperations(deps: MemoryOperationsDeps) {
       return listRetainReceipts(cwd, limit);
     },
 
-    async flush(cwd: string) {
-      return flushRetain(cwd, deps.getConfig(), deps.getClient());
+    async flush(cwd: string, sessionFile?: string) {
+      const config = deps.getConfig();
+      const meta = await readSessionMemoryMeta(cwd, sessionFile);
+      if (
+        !config.enabled ||
+        !isMemorySetupComplete(config, cwd) ||
+        !getEffectiveSessionMemoryMode(meta).retain
+      ) {
+        const summary = await summarizeRetainQueue(retainQueuePath(cwd, config));
+        return {
+          sent: 0,
+          remaining: summary.active.valid,
+          deadLettered: 0,
+          malformed: summary.active.malformed,
+        };
+      }
+      return flushRetain(cwd, config, deps.getClient());
     },
   };
 }

@@ -219,7 +219,21 @@ export type FlushRetainQueueOptions = {
   maxJobs?: number;
   stopOnFirstFailure?: boolean;
   maxElapsedMs?: number;
+  /** Consent gate: only jobs this returns true for are delivered. Rejected jobs stay
+   * queued in FIFO order untouched (no retry increment, no maxJobs budget, no delivery). */
+  predicate?: (job: RetainJob) => boolean;
 };
+
+const EXPLICIT_RETAIN_SOURCES: ReadonlySet<string> = new Set(["tool", "git-seed", "import"]);
+
+/** True only for jobs the user explicitly asked to retain (tool call, git seed, import) —
+ * never automatic agent_end retains ("auto") and never legacy/untagged jobs. Used to gate
+ * recall-only flushes: explicit provenance consented to delivery even when automatic
+ * retain is disabled. */
+export function isExplicitRetainJob(job: RetainJob): boolean {
+  const retainSource = job.item.metadata?.retainSource;
+  return typeof retainSource === "string" && EXPLICIT_RETAIN_SOURCES.has(retainSource);
+}
 
 export interface RetainDeliverySummary {
   queueJobId: string;
@@ -304,11 +318,19 @@ export async function flushRetainQueue(
     let tokens = 0;
     let hasTokens = false;
     let sent = 0;
+    let attempted = 0;
     for (const [index, job] of jobs.entries()) {
-      if (index >= maxJobs || Date.now() - started >= maxElapsedMs) {
+      // Predicate-rejected jobs are kept as-is in FIFO order: no delivery attempt, no
+      // retry burn, and no maxJobs/maxElapsedMs budget consumed by consent filtering.
+      if (resolvedOptions.predicate && !resolvedOptions.predicate(job)) {
+        remaining.push(job);
+        continue;
+      }
+      if (attempted >= maxJobs || Date.now() - started >= maxElapsedMs) {
         remaining.push(...jobs.slice(index));
         break;
       }
+      attempted += 1;
       try {
         const response = await deliverRetainJob(client, job);
         const outcome = parseRetainOutcome(response);
@@ -403,9 +425,22 @@ export async function flushRetain(
   cwd: string,
   config: ResolvedConfig,
   client: HindsightLikeClient,
-  options?: FlushRetainQueueOptions,
+  options?: Omit<FlushRetainQueueOptions, "predicate">,
 ): Promise<FlushRetainQueueResult> {
-  return flushRetainQueue(retainQueuePath(cwd, config), client, options);
+  const path = retainQueuePath(cwd, config);
+  if (!config.enabled) {
+    const summary = await summarizeRetainQueue(path);
+    return {
+      sent: 0,
+      remaining: summary.active.valid,
+      deadLettered: 0,
+      malformed: summary.active.malformed,
+    };
+  }
+  return flushRetainQueue(path, client, {
+    ...options,
+    ...(config.retain.enabled ? {} : { predicate: isExplicitRetainJob }),
+  });
 }
 
 export async function readQueuedRetains(cwd: string, config: ResolvedConfig): Promise<RetainJob[]> {
@@ -418,11 +453,4 @@ export async function removeQueuedRetains(
   predicate: (job: RetainJob) => boolean,
 ): Promise<number> {
   return removeRetainQueueJobs(retainQueuePath(cwd, config), predicate);
-}
-
-export async function summarizeRetain(
-  cwd: string,
-  config: ResolvedConfig,
-): Promise<RetainQueueSummary> {
-  return summarizeRetainQueue(retainQueuePath(cwd, config));
 }
