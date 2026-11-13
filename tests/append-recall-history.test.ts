@@ -189,4 +189,106 @@ describe("append recall history", () => {
     expect(existsSync(join(cwd, ".pi", "hindsight", "last-recall.json"))).toBe(false);
     expect(mocked.client.retain).not.toHaveBeenCalled();
   });
+
+  it("attaches the recall to the prompt when run-start custom messages follow it", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-hindsight-history-"));
+    mkdirSync(join(cwd, ".git"));
+    writeSetupCompleteConfig(cwd, {
+      recall: { injectionPosition: "append", storeLastRecall: false },
+    });
+    const { createMemoryLifecycle } = await import("../extensions/lifecycle/memory-lifecycle.js");
+    const lifecycle = createMemoryLifecycle(cwd);
+    let branch: any[] = [];
+    const ctx = {
+      cwd,
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+      sessionManager: {
+        getSessionId: () => "session-a",
+        getSessionFile: () => join(cwd, "session-a.jsonl"),
+        getBranch: () => branch,
+      },
+    };
+    await lifecycle.initialize(ctx);
+    let count = 0;
+    mocked.client.recall.mockImplementation(async () => ({
+      results: [{ text: `recall-${++count}` }],
+    }));
+    const user = (content: string, timestamp: number) => ({ role: "user", content, timestamp });
+    // Shape Pi gives a message returned from another extension's before_agent_start handler.
+    const runStart = (timestamp: number) => ({
+      role: "custom",
+      customType: "other-extension-run-context",
+      content: "run-start block from another extension",
+      display: false,
+      timestamp,
+    });
+    const assistant = { role: "assistant", content: "answer", timestamp: 3 };
+    const tool = { role: "toolResult", content: "result", timestamp: 4 };
+    const recall = async (messages: any[], ids: string[]) => {
+      branch = messages.map((message, i) =>
+        message.role === "custom"
+          ? { type: "custom_message", id: ids[i], customType: message.customType }
+          : { type: "message", id: ids[i], message },
+      );
+      const original = structuredClone(messages);
+      const patch = await lifecycle.recall({ messages } as any, ctx);
+      expect(messages).toEqual(original);
+      return patch?.messages ?? messages;
+    };
+    const u1 = user("first prompt", 1);
+    const c1 = runStart(2);
+
+    // First request of the run: the recall goes before the prompt, not before the run-start block.
+    const first = await recall([u1, c1], ["u1", "c1"]);
+    expect(first).toHaveLength(3);
+    expect(first[0]?.content).toContain("recall-1");
+    expect(first.slice(1)).toEqual([u1, c1]);
+    const queries = JSON.stringify(mocked.client.recall.mock.calls);
+    expect(queries).toContain("first prompt");
+    expect(queries).not.toContain("run-start block from another extension");
+
+    // Sending the opening request again, or with one more run-start message, reuses that recall.
+    expect(await recall([u1, c1], ["u1", "c1"])).toEqual(first);
+    const c1b = { ...runStart(2), customType: "second-extension-run-context" };
+    expect(await recall([u1, c1, c1b], ["u1", "c1", "c1b"])).toEqual([...first, c1b]);
+    expect(count).toBe(1);
+
+    // Later requests of the run extend the first one: same recall, same position.
+    const second = await recall([u1, c1, assistant, tool], ["u1", "c1", "a1", "tool1"]);
+    expect(second).toEqual([...first, assistant, tool]);
+
+    // A run opened by a custom message has no prompt to attach a recall to.
+    const notice = { ...runStart(5), customType: "background-notice", content: "run finished" };
+    const c2 = runStart(6);
+    const customRun = await recall([u1, c1, assistant, notice, c2], ["u1", "c1", "a1", "n1", "c2"]);
+    expect(customRun).toEqual([...first, assistant, notice, c2]);
+    expect(count).toBe(1);
+
+    // The next prompt gets its own recall, again before the prompt.
+    const u2 = user("second prompt", 7);
+    const c3 = runStart(8);
+    const next = await recall([u1, c1, assistant, u2, c3], ["u1", "c1", "a1", "u2", "c3"]);
+    expect(next.slice(0, 4)).toEqual([...first, assistant]);
+    expect(next[4]?.content).toContain("recall-2");
+    expect(next.slice(5)).toEqual([u2, c3]);
+    expect(
+      await recall([u1, c1, assistant, u2, c3, tool], ["u1", "c1", "a1", "u2", "c3", "tool2"]),
+    ).toEqual([...next, tool]);
+    expect(count).toBe(2);
+  });
+});
+
+describe("appendRecallAnchorIndex", () => {
+  it("finds the prompt only when nothing but custom messages follows it", async () => {
+    const { appendRecallAnchorIndex } =
+      await import("../extensions/lifecycle/memory-lifecycle-recall.js");
+    const roles = (...list: string[]) => list.map((role) => ({ role }));
+    expect(appendRecallAnchorIndex([])).toBeUndefined();
+    expect(appendRecallAnchorIndex(roles("assistant", "user"))).toBe(1);
+    expect(appendRecallAnchorIndex(roles("user", "custom", "custom"))).toBe(0);
+    expect(appendRecallAnchorIndex(roles("user", "custom", "user", "custom"))).toBe(2);
+    expect(appendRecallAnchorIndex(roles("user", "assistant", "custom"))).toBeUndefined();
+    expect(appendRecallAnchorIndex(roles("user", "toolResult"))).toBeUndefined();
+    expect(appendRecallAnchorIndex(roles("custom"))).toBeUndefined();
+  });
 });

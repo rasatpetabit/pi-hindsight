@@ -89,10 +89,20 @@ export function createRecallCache(ttlMs: number | (() => number) = 60000) {
   };
 }
 
-function canAppendRecallMessage(event: ContextEvent): boolean {
-  const last = event.messages[event.messages.length - 1];
-  const lastRole = (last as unknown as { role?: string } | undefined)?.role;
-  return Boolean(last && lastRole === "user");
+/**
+ * Index of the prompt a new recall attaches to: the last user message, provided only custom
+ * messages follow it. Pi stores the messages extensions return at run start after the prompt,
+ * so the prompt that opens a run is not always the final message.
+ */
+export function appendRecallAnchorIndex(
+  messages: readonly { role?: string }[],
+): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = messages[i]?.role;
+    if (role === "user") return i;
+    if (role !== "custom") return undefined;
+  }
+  return undefined;
 }
 
 function buildRecallNotification(memoryCount: number, bankIds: string[], failed: number): string {
@@ -142,7 +152,8 @@ function createAppendRecallHistory() {
     for (const key of activeSnapshots.keys()) {
       if (!active.has(key)) activeSnapshots.delete(key);
     }
-    const tail = keys.get(event.messages.length - 1);
+    const anchorIndex = appendRecallAnchorIndex(event.messages);
+    const tail = anchorIndex === undefined ? undefined : keys.get(anchorIndex);
     // Unknown historical turns were already sent without a snapshot in this epoch.
     for (const key of active) {
       if (key !== tail && !activeSnapshots.has(key)) activeSnapshots.set(key, undefined);
@@ -155,6 +166,7 @@ function createAppendRecallHistory() {
           return entry?.rendered ? [entry.rendered] : [];
         })
         .join("\n\n"),
+      anchored: tail !== undefined,
       known: tail !== undefined && activeSnapshots.has(tail),
       entry: tail === undefined ? undefined : activeSnapshots.get(tail),
       remember(entry: RecallCacheEntry | undefined) {
@@ -236,7 +248,7 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
       }
       const history =
         config.recall.injectionPosition === "append" ? appendHistory(event, runtime) : undefined;
-      if (history && (!canAppendRecallMessage(event) || (history.known && !history.entry))) {
+      if (history && (!history.anchored || (history.known && !history.entry))) {
         const patch = history.patch();
         injection(patch ? "success" : "skipped", history.rendered, {
           reason: "append-history",
