@@ -247,6 +247,12 @@ describe("append recall history", () => {
     expect(queries).toContain("first prompt");
     expect(queries).not.toContain("run-start block from another extension");
 
+    // Sending the opening request again, or with one more run-start message, reuses that recall.
+    expect(await recall([u1, c1], ["u1", "c1"])).toEqual(first);
+    const c1b = { ...runStart(2), customType: "second-extension-run-context" };
+    expect(await recall([u1, c1, c1b], ["u1", "c1", "c1b"])).toEqual([...first, c1b]);
+    expect(count).toBe(1);
+
     // Later requests of the run extend the first one: same recall, same position.
     const second = await recall([u1, c1, assistant, tool], ["u1", "c1", "a1", "tool1"]);
     expect(second).toEqual([...first, assistant, tool]);

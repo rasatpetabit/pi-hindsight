@@ -90,9 +90,9 @@ export function createRecallCache(ttlMs: number | (() => number) = 60000) {
 }
 
 /**
- * Index of the prompt a new recall attaches to: the last user message, provided only
- * extension-injected custom messages follow it. Pi stores such run-start messages after the
- * prompt, so the prompt that opens a run is not always the final message.
+ * Index of the prompt a new recall attaches to: the last user message, provided only custom
+ * messages follow it. Pi stores the messages extensions return at run start after the prompt,
+ * so the prompt that opens a run is not always the final message.
  */
 export function appendRecallAnchorIndex(
   messages: readonly { role?: string }[],
