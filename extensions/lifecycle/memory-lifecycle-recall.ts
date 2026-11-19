@@ -14,6 +14,11 @@ import { redactError } from "../utils/sanitize.js";
 import { writeLastRecallSnapshot } from "./recall-visibility.js";
 import { selectMemoryScopes } from "../operations/memory-scope.js";
 import {
+  readRecallHistory,
+  writeRecallHistory,
+  type RecallHistoryRecord,
+} from "./recall-history-store.js";
+import {
   getEffectiveSessionMemoryMode,
   readSessionMemoryMeta,
 } from "../utils/session-memory-meta.js";
@@ -40,6 +45,14 @@ export interface RecallTurnPolicyDeps {
     memoryCount?: number,
   ): void;
   notify(runtime: RuntimeSnapshot, message: string, level: "info" | "warning"): void;
+  /**
+   * Private per-session sidecar. Defaults to the on-disk store. A test may inject
+   * its own read/write pair; production does not pass transcript entries through here.
+   */
+  recallHistory?: {
+    read(runtime: RuntimeSnapshot, key: string): RecallHistoryRecord | undefined;
+    write(runtime: RuntimeSnapshot, snapshot: RecallHistoryRecord): void;
+  };
 }
 
 interface RecallCacheEntry {
@@ -113,17 +126,35 @@ function buildRecallNotification(memoryCount: number, bankIds: string[], failed:
   return "Hindsight recalled no matching memory";
 }
 
-/** Request-local reconstruction only: never add these snapshots to the session transcript. */
-function createAppendRecallHistory() {
+/** Real session entry ids only. `message:<sig>:<occ>` is the in-memory fallback. */
+function isDurableRecallAnchor(runtime: RuntimeSnapshot, key: string): boolean {
+  return Boolean(runtime.sessionFile) && !key.startsWith("message:");
+}
+
+/**
+ * Append-mode recall history. Durable anchors are private sidecar files, never
+ * transcript entries. A new instance restores active anchors before unknown
+ * turns are frozen as already sent without a snapshot. A present record is
+ * restored even when its rendered text is empty, so an empty success and a
+ * failed-recall tombstone both stay frozen across reload.
+ */
+function createAppendRecallHistory(deps: {
+  read(runtime: RuntimeSnapshot, key: string): RecallHistoryRecord | undefined;
+  write(runtime: RuntimeSnapshot, snapshot: RecallHistoryRecord): void;
+  notify(runtime: RuntimeSnapshot, message: string, level: "info" | "warning"): void;
+}) {
   let session = "";
   let snapshots = new Map<string, RecallCacheEntry | undefined>();
+  let restored = new Set<string>();
   return (event: ContextEvent, runtime: RuntimeSnapshot) => {
     const identity = JSON.stringify([runtime.cwd, runtime.sessionFile, runtime.sessionId]);
     if (identity !== session) {
       session = identity;
       snapshots = new Map();
+      restored = new Set();
     }
     const activeSnapshots = snapshots;
+    const restoredKeys = restored;
     const signature = (message: CacheKeyMessage) =>
       JSON.stringify([message.timestamp, message.content]);
     const entries = new Map<string, string[]>();
@@ -150,14 +181,73 @@ function createAppendRecallHistory() {
     }
     const active = new Set(keys.values());
     for (const key of activeSnapshots.keys()) {
-      if (!active.has(key)) activeSnapshots.delete(key);
+      if (active.has(key)) continue;
+      activeSnapshots.delete(key);
+      restoredKeys.delete(key);
     }
     const anchorIndex = appendRecallAnchorIndex(event.messages);
     const tail = anchorIndex === undefined ? undefined : keys.get(anchorIndex);
+    // Reload, restart, and resume arrive as a new map. Seed missing active keys
+    // before unknown turns are frozen as "sent without a snapshot".
+    for (const key of active) {
+      if (activeSnapshots.has(key) || !isDurableRecallAnchor(runtime, key)) continue;
+      const seeded = deps.read(runtime, key);
+      // Presence freezes the turn, including an empty success or failure tombstone.
+      if (!seeded) continue;
+      // Minimal cache entry: rendered text and timestamp only, so restore cannot refetch.
+      activeSnapshots.set(key, {
+        rendered: seeded.rendered,
+        blocks: [],
+        failed: 0,
+        failures: [],
+        timestamp: seeded.timestamp,
+      });
+      restoredKeys.add(key);
+    }
     // Unknown historical turns were already sent without a snapshot in this epoch.
     for (const key of active) {
       if (key !== tail && !activeSnapshots.has(key)) activeSnapshots.set(key, undefined);
     }
+    const persist = (rendered: string, timestamp: number) => {
+      if (tail === undefined || !isDurableRecallAnchor(runtime, tail)) return;
+      try {
+        deps.write(runtime, { key: tail, rendered, timestamp });
+      } catch (error) {
+        // The in-memory map already has the result. A sidecar failure must not
+        // turn a successful recall into a failed one, or mask an unexpected failure.
+        deps.notify(
+          runtime,
+          `Hindsight recall history write failed: ${redactError(error)}`,
+          "warning",
+        );
+      }
+    };
+    const remember = (entry: RecallCacheEntry | undefined) => {
+      if (tail === undefined) return;
+      const previous = activeSnapshots.get(tail);
+      const had = activeSnapshots.has(tail);
+      activeSnapshots.set(tail, entry);
+      restoredKeys.delete(tail);
+      if (!entry) return;
+      if (
+        had &&
+        previous &&
+        previous.rendered === entry.rendered &&
+        previous.timestamp === entry.timestamp
+      ) {
+        return;
+      }
+      persist(entry.rendered, entry.timestamp);
+    };
+    // Unexpected failure only. remember(undefined) stays in-memory: an unknown
+    // historical turn is not a failed recall, and a block already recorded for
+    // this anchor must not be replaced by a tombstone.
+    const freezeFailure = () => {
+      const alreadyKnown = tail !== undefined && activeSnapshots.has(tail);
+      remember(undefined);
+      if (alreadyKnown) return;
+      persist("", Date.now());
+    };
     return {
       rendered: event.messages
         .flatMap((_message, index) => {
@@ -168,10 +258,10 @@ function createAppendRecallHistory() {
         .join("\n\n"),
       anchored: tail !== undefined,
       known: tail !== undefined && activeSnapshots.has(tail),
+      restored: tail !== undefined && restoredKeys.has(tail),
       entry: tail === undefined ? undefined : activeSnapshots.get(tail),
-      remember(entry: RecallCacheEntry | undefined) {
-        if (tail !== undefined) activeSnapshots.set(tail, entry);
-      },
+      remember,
+      freezeFailure,
       patch(): ContextPatch | undefined {
         let injected = false;
         const messages = event.messages.flatMap((message, index) => {
@@ -192,7 +282,22 @@ function createAppendRecallHistory() {
 
 export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPolicy {
   const cache = createRecallCache(() => deps.getConfig().recall.cacheTtlMs);
-  const appendHistory = createAppendRecallHistory();
+  const recallHistory = deps.recallHistory ?? {
+    read: (runtime: RuntimeSnapshot, key: string) =>
+      readRecallHistory(runtime.sessionFile, runtime.cwd, key),
+    write: (runtime: RuntimeSnapshot, snapshot: RecallHistoryRecord) => {
+      writeRecallHistory(runtime.sessionFile, runtime.cwd, snapshot);
+    },
+  };
+  const appendHistory = createAppendRecallHistory({
+    read: (runtime, key) => recallHistory.read(runtime, key),
+    write: (runtime, snapshot) => {
+      recallHistory.write(runtime, snapshot);
+    },
+    notify: (runtime, message, level) => {
+      deps.notify(runtime, message, level);
+    },
+  });
   const origins = new WeakMap<RecallCacheEntry, RetrievalTelemetry[]>();
   return {
     async recall(event: ContextEvent, runtime: RuntimeSnapshot): Promise<ContextPatch | undefined> {
@@ -248,7 +353,7 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
       }
       const history =
         config.recall.injectionPosition === "append" ? appendHistory(event, runtime) : undefined;
-      if (history && (!history.anchored || (history.known && !history.entry))) {
+      if (history && (!history.anchored || history.restored || (history.known && !history.entry))) {
         const patch = history.patch();
         injection(patch ? "success" : "skipped", history.rendered, {
           reason: "append-history",
@@ -406,7 +511,7 @@ export function createRecallTurnPolicy(deps: RecallTurnPolicyDeps): RecallTurnPo
             // Best-effort debug snapshot; do not let a write failure mask the original recall failure.
           }
         }
-        history?.remember(undefined);
+        history?.freezeFailure();
         return history?.patch();
       }
     },

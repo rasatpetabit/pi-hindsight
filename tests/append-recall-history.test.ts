@@ -174,16 +174,21 @@ describe("append recall history", () => {
     const compacted = await recall([t2, tool], ["sibling-u2", "tool2"]);
     expect(compacted[0]?.content).toContain("recall-4");
     expect(JSON.stringify(compacted)).not.toContain("recall-1");
-    await recall([], []); // reset prunes all, even if IDs are later encountered again
-    expect(await recall([t2, tool], ["sibling-u2", "tool2"])).toEqual([t2, tool]);
-    expect(count).toBe(4); // never fetch beside already-sent history
+    await recall([], []); // the in-memory map drops every anchor
+    // The same entry id is still durable, so the private sidecar restores its recall
+    // without a new fetch. A different session file would not.
+    const resurrected = await recall([t2, tool], ["sibling-u2", "tool2"]);
+    expect(String(resurrected[0]?.content)).toContain("recall-4");
+    expect(resurrected.slice(1)).toEqual([t2, tool]);
+    expect(count).toBe(4);
     session = "session-b";
     expect(await recall([t1, tool], ["u1", "tool1"])).toEqual([t1, tool]);
     vi.setSystemTime(Date.now() + 61_000);
     const switched = await recall([t1, tool, t2], ["u1", "tool1", "u2"]);
     expect(switched.at(-2)?.content).toContain("recall-5");
     expect(JSON.stringify(switched)).not.toContain("recall-1");
-    // Explicit reload creates a new ephemeral epoch, not retrospective recall.
+    // u1 was frozen on this session without a snapshot, and the run is unanchored,
+    // so reload has nothing to restore and does not fetch.
     const reloaded = createMemoryLifecycle(cwd);
     expect(await reloaded.recall({ messages: [t1, tool] } as any, ctx)).toBeUndefined();
     expect(existsSync(join(cwd, ".pi", "hindsight", "last-recall.json"))).toBe(false);
